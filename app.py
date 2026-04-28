@@ -1,8 +1,12 @@
 from flask import Flask, render_template, request, jsonify
-import pickle, re, string
-app = Flask(__name__)
-model = pickle.load(open("model.pkl","rb"))
-vec   = pickle.load(open("vectorizer.pkl","rb"))
+import pickle, re, string, os
+
+# Use absolute paths for Vercel serverless compatibility
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
+
+model = pickle.load(open(os.path.join(BASE_DIR, "model.pkl"), "rb"))
+vec   = pickle.load(open(os.path.join(BASE_DIR, "vectorizer.pkl"), "rb"))
 
 def clean(text):
     text = text.lower()
