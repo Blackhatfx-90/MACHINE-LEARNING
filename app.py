@@ -1,67 +1,56 @@
 from flask import Flask, render_template, request, jsonify
-import pickle, re, string, os, math
+import json, re, string, os, math
 
 # Use absolute paths for Vercel serverless compatibility
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 
-# ─── Load ML model ───
-model = pickle.load(open(os.path.join(BASE_DIR, "model.pkl"), "rb"))
-vec = pickle.load(open(os.path.join(BASE_DIR, "vectorizer.pkl"), "rb"))
-
 # ═══════════════════════════════════════════════════════════════
-# FAKE NEWS DETECTION — HYBRID APPROACH
-# Combines ML model prediction with linguistic analysis
+# WORD-SCORE CLASSIFIER (learned from 44K training articles)
+# Each word has a score: positive = fake-leaning, negative = real-leaning
+# This is essentially a Naive Bayes classifier built from training data
 # ═══════════════════════════════════════════════════════════════
 
-# ─── Sensational / clickbait / conspiracy phrases (strong FAKE signals) ───
-FAKE_PHRASES = [
-    'you wont believe', 'you won t believe', 'doctors hate',
-    'one weird trick', 'this one trick', 'secret they',
-    'what they dont want', 'what they don t want',
-    'shocking truth', 'jaw dropping', 'mind blowing',
-    'illuminati', 'new world order', 'deep state',
-    'chemtrails', 'flat earth', 'crisis actor',
-    'false flag', 'mind control', 'sheeple',
-    'wake up people', 'government cover up', 'government hiding',
-    'big pharma hiding', 'media blackout',
-    'mainstream media lies', 'miracle cure', 'cures all',
-    'secret cure', 'drinking bleach', 'bleach cures',
-    'vaccines cause autism', 'implanting chips', 'microchip vaccine',
-    '5g causes', '5g spread', 'aliens landed', 'alien invasion',
-    'moon is made of cheese', 'earth is flat', 'zombie apocalypse',
-    'share before deleted', 'share before they', 'they will delete',
-    'banned from sharing', 'anonymous doctor says',
-    'scientists baffled by this', 'exposed exposed',
-]
+# Load word scores (precomputed from Fake.csv + True.csv titles)
+word_stats_path = os.path.join(BASE_DIR, "word_stats.json")
+with open(word_stats_path, 'r') as f:
+    stats = json.load(f)
 
-# ─── Sensational single words ───
-SENSATIONAL_WORDS = [
-    'shocking', 'unbelievable', 'incredible', 'horrifying', 'terrifying',
-    'disgusting', 'outrageous', 'insane', 'crazy', 'mindblowing',
-    'explosive', 'bombshell', 'devastating', 'nightmare', 'catastrophic',
-    'evil', 'sinister', 'corrupt', 'betrayal', 'treason', 'traitor',
-    'destroy', 'destroyed', 'annihilate', 'demolish',
-]
+WORD_SCORES = stats['word_scores']  # word -> log2(fake_freq / real_freq)
+print(f"✅ Loaded {len(WORD_SCORES)} word scores from training data")
 
-# ─── Journalistic / institutional phrases (strong REAL signals) ───
-REAL_PHRASES = [
-    'reuters', 'associated press', 'according to',
-    'officials said', 'officials stated', 'spokesperson said',
-    'spokesperson confirmed', 'press conference', 'official statement',
-    'confirmed by', 'in a statement', 'told reporters',
-    'prime minister', 'federal reserve', 'supreme court',
-    'united nations', 'world health organization',
-    'study published', 'published in nature', 'published in lancet',
-    'peer reviewed', 'researchers found', 'researchers at',
-    'clinical trial', 'quarterly earnings', 'fiscal year',
-    'gdp growth', 'inflation rate', 'interest rate',
-    'signed into law', 'bipartisan support', 'passed the bill',
-    'election commission', 'press trust of india',
-]
+# ─── Also try loading sklearn model for long articles ───
+ML_MODEL = None
+try:
+    import pickle
+    model_path = os.path.join(BASE_DIR, "model.pkl")
+    vec_path = os.path.join(BASE_DIR, "vectorizer.pkl")
+    ML_MODEL = pickle.load(open(model_path, "rb"))
+    ML_VEC = pickle.load(open(vec_path, "rb"))
+    print("✅ ML model loaded for long article analysis")
+except Exception as e:
+    print(f"⚠️  ML model not available: {e}")
 
-def clean(text):
-    """Clean text — same as training pipeline."""
+# Stop words
+STOP_WORDS = set('a an the is are was were be been being have has had do does did '
+                 'will would shall should may might can could of in to for on with '
+                 'at by from as into about above after before between through during '
+                 'and or but not no nor so yet both either neither each every all '
+                 'any few more most other some such than too very also how what '
+                 'which who whom this that these those i me my we our you your '
+                 'he him his she her it its they them their'.split())
+
+def clean_for_scoring(text):
+    """Clean text for word-score classification."""
+    text = str(text).lower()
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+    text = re.sub(r'<.*?>', '', text)
+    text = re.sub(r'[%s]' % re.escape(string.punctuation), ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def clean_for_ml(text):
+    """Clean text for ML model (must match training pipeline exactly)."""
     text = str(text).lower()
     text = re.sub(r'https?://\S+|www\.\S+', '', text)
     text = re.sub(r'<.*?>', '', text)
@@ -70,199 +59,137 @@ def clean(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def compute_linguistic_score(original_text, cleaned_text):
+# ─── Absurd claims / known misinformation patterns ───
+# These catch things the training data (2017) can't detect
+ABSURD_CLAIMS = [
+    # Celebrities/non-politicians as political leaders
+    r'\b(mia khalifa|kim kardashian|kanye west|elon musk|pewdiepie|'
+    r'mr beast|justin bieber|taylor swift|drake|rihanna|beyonce|'
+    r'cristiano ronaldo|messi|neymar|salman khan|shahrukh khan|'
+    r'amitabh bachchan|virat kohli|sachin)\b.{0,30}'
+    r'\b(president|prime minister|pm|king|queen|ruler|dictator|'
+    r'chief minister|governor|senator|minister)\b',
+    
+    # Reverse: political title then celebrity
+    r'\b(president|prime minister|pm|king|queen|ruler|chief minister)\b'
+    r'.{0,30}\b(mia khalifa|kim kardashian|kanye west|pewdiepie|'
+    r'mr beast|justin bieber|taylor swift|drake|rihanna|beyonce|'
+    r'salman khan|shahrukh khan|amitabh bachchan)\b',
+]
+
+# Post-2017 misinformation topics (not in training data)
+MODERN_FAKE_PATTERNS = [
+    'microchip', 'microchips', '5g causes', '5g spread', '5g tower',
+    'plandemic', 'scamdemic', 'covid hoax', 'corona hoax',
+    'covid is fake', 'vaccine kill', 'vaccine death', 'depopulation',
+    'great reset', 'qanon', 'adrenochrome', 'pizzagate',
+    'bill gates chip', 'bill gates vaccine', 'soros funded',
+    'antifa', 'stolen election', 'rigged election',
+]
+
+# Real journalism patterns (boost real score)
+JOURNALISM_PATTERNS = [
+    'according to', 'officials said', 'spokesperson', 'press conference',
+    'reuters', 'associated press', 'study published', 'researchers found',
+    'degrees celsius', 'percent increase', 'percent decrease',
+    'quarterly', 'fiscal', 'bipartisan', 'legislation',
+    'united nations', 'world health', 'supreme court',
+    'nasa', 'isro', 'european space agency', 'space station',
+    'rover', 'satellite launch', 'chandrayaan', 'mangalyaan',
+    'pentagon', 'world bank', 'imf', 'federal bureau',
+    'earthquake', 'magnitude', 'richter', 'tsunami warning',
+    'hurricane category', 'cyclone', 'typhoon',
+]
+
+def word_score_predict(text):
     """
-    Compute a linguistic fake-score from 0 (very real) to 1 (very fake).
-    Analyzes writing style, emotional language, and structural patterns.
+    Classify using word scores learned from 44K training articles,
+    plus absurd claims detection and modern fake patterns.
     """
-    text_lower = cleaned_text.lower()
-    words = cleaned_text.split()
-    word_count = len(words)
-    if word_count == 0:
-        return 0.5
+    cleaned = clean_for_scoring(text)
+    text_lower = text.lower()
+    words = [w for w in cleaned.split() if w not in STOP_WORDS and len(w) > 2]
     
-    score = 0.0
-    signals = 0
+    if not words:
+        return "FAKE", 0.0
     
-    # ─── 1. Fake phrase matching (strong signal) ───
-    fake_phrase_hits = sum(1 for p in FAKE_PHRASES if p in text_lower)
-    if fake_phrase_hits >= 2:
-        score += 0.9
-        signals += 3
-    elif fake_phrase_hits == 1:
-        score += 0.7
-        signals += 2
+    # ─── Check absurd claims first (instant FAKE) ───
+    for pattern in ABSURD_CLAIMS:
+        if re.search(pattern, cleaned):
+            return "FAKE", 10.0  # Very high fake score
     
-    # ─── 2. Real phrase matching (strong signal) ───
-    real_phrase_hits = sum(1 for p in REAL_PHRASES if p in text_lower)
-    if real_phrase_hits >= 2:
-        score += 0.05
-        signals += 3
-    elif real_phrase_hits == 1:
-        score += 0.15
-        signals += 2
+    # ─── Word score from training data ───
+    total_score = 0.0
+    matched_words = 0
     
-    # ─── 3. Sensational word density ───
-    sensational_count = sum(1 for w in SENSATIONAL_WORDS if w in text_lower)
-    sensational_ratio = sensational_count / max(word_count, 1)
-    if sensational_count >= 3:
-        score += 0.8
-        signals += 2
-    elif sensational_count >= 2:
-        score += 0.65
-        signals += 1
-    elif sensational_count == 1:
-        score += 0.5
-        signals += 1
+    for word in words:
+        if word in WORD_SCORES:
+            total_score += WORD_SCORES[word]
+            matched_words += 1
+    
+    # ─── Modern fake pattern bonus ───
+    modern_fake_hits = sum(1 for p in MODERN_FAKE_PATTERNS if p in cleaned)
+    if modern_fake_hits > 0:
+        total_score += modern_fake_hits * 3.0  # Strong fake boost
+        matched_words += modern_fake_hits
+    
+    # ─── Real journalism pattern bonus ───
+    journalism_hits = sum(1 for p in JOURNALISM_PATTERNS if p in cleaned)
+    if journalism_hits > 0:
+        total_score -= journalism_hits * 2.0  # Real boost
+        matched_words += journalism_hits
+    
+    # Normalize
+    if matched_words > 0:
+        avg_score = total_score / matched_words
     else:
-        score += 0.4  # No sensational words = slightly leans real
-        signals += 1
+        # No words matched at all — unknown vocabulary
+        # Could be anything, slight lean toward FAKE for safety
+        avg_score = 0.3
     
-    # ─── 4. ALL CAPS usage (sensationalism) ───
-    orig_words = original_text.split()
-    caps_words = sum(1 for w in orig_words if w.isupper() and len(w) > 2)
-    caps_ratio = caps_words / max(len(orig_words), 1)
-    if caps_ratio > 0.5 and len(orig_words) > 3:
-        score += 0.8
-        signals += 1
-    elif caps_ratio > 0.25:
-        score += 0.6
-        signals += 1
+    # Positive = FAKE, Negative = REAL
+    if avg_score > 0:
+        return "FAKE", avg_score
     else:
-        score += 0.35
-        signals += 1
-    
-    # ─── 5. Exclamation / question mark excess ───
-    excl_count = original_text.count('!') + original_text.count('?')
-    if excl_count >= 3:
-        score += 0.75
-        signals += 1
-    elif excl_count >= 2:
-        score += 0.55
-        signals += 1
-    else:
-        score += 0.35
-        signals += 1
-    
-    # ─── 6. Vague attribution ("they say", "sources say") ───
-    vague_phrases = ['they say', 'sources say', 'people are saying',
-                     'everyone knows', 'it is known', 'some say',
-                     'many believe', 'rumor has it', 'word is that']
-    vague_count = sum(1 for p in vague_phrases if p in text_lower)
-    if vague_count > 0:
-        score += 0.65
-        signals += 1
-    
-    # ─── 7. Absolute language ("always", "never", "all", "every") ───
-    absolutes = ['always', 'never', 'all of them', 'every single',
-                 'nobody', 'everyone', 'completely', 'totally',
-                 'absolutely', 'definitely', 'proven fact', '100 percent']
-    absolute_count = sum(1 for a in absolutes if a in text_lower)
-    if absolute_count >= 2:
-        score += 0.65
-        signals += 1
-    elif absolute_count == 1:
-        score += 0.5
-        signals += 1
-    
-    # ─── 8. Extreme / unrealistic claims detection ───
-    extreme_claim = False
-    
-    # Extreme price drops: "falls to $1", "drops to $5", "crashes to $0"
-    price_drop = re.search(
-        r'(falls?|drops?|crash|crashes|crashed|plummets?|sinks?|tumbles?)'
-        r'\s+(to|below)\s+\$?\s*\d{1,2}(\.\d+)?\b',
-        text_lower
-    )
-    if price_drop:
-        extreme_claim = True
-    
-    # Extreme percentage claims: "drops 90%", "falls 99%", "increases 1000%"
-    pct_match = re.search(
-        r'(drops?|falls?|crash|loses?|gains?|increases?|rises?|surges?)'
-        r'\s+\d+\s*(%|percent)',
-        text_lower
-    )
-    if pct_match:
-        num_match = re.search(r'(\d+)\s*(%|percent)', text_lower)
-        if num_match:
-            pct_val = int(num_match.group(1))
-            if pct_val >= 80 or pct_val >= 500:  # 80%+ drop or 500%+ gain
-                extreme_claim = True
-    
-    # "Free" / too good to be true
-    too_good = re.search(
-        r'(free money|free iphone|free bitcoin|won a|you have won|'
-        r'congratulations you|claim your prize|lottery winner|'
-        r'send this to|forward this to)',
-        text_lower
-    )
-    if too_good:
-        extreme_claim = True
-    
-    # Extreme world event claims (without proper source attribution)
-    extreme_events = [
-        'world war 3', 'world war iii', 'nuclear bomb dropped',
-        'president assassinated', 'president killed', 'country destroyed',
-        'city destroyed', 'millions dead', 'billions dead',
-        'end of the world', 'apocalypse', 'martial law declared',
-        'internet shutdown', 'dollar collapsed', 'economy collapsed',
-    ]
-    extreme_event_hits = sum(1 for e in extreme_events if e in text_lower)
-    if extreme_event_hits > 0 and real_phrase_hits == 0:
-        extreme_claim = True
-    
-    if extreme_claim:
-        score += 0.85
-        signals += 2  # Double weight for extreme claims
-    
-    # Compute average (weighted by signals)
-    if signals > 0:
-        avg_score = score / signals
-    else:
-        avg_score = 0.5
-    
-    return avg_score
+        return "REAL", avg_score
+
+def ml_predict(text):
+    """Use sklearn model for long article classification."""
+    cleaned = clean_for_ml(text)
+    vector = ML_VEC.transform([cleaned])
+    pred = ML_MODEL.predict(vector)[0]
+    prob = ML_MODEL.predict_proba(vector)[0]
+    label = "REAL" if pred == 1 else "FAKE"
+    return label, prob
 
 def predict_news(news_text):
     """
-    Hybrid prediction combining ML model + linguistic analysis.
-    Returns 'REAL' or 'FAKE'.
+    Main prediction function.
+    - Short text (< 80 words): Use word-score classifier (trained on titles)
+    - Long text (80+ words): Combine word-score + ML model
     """
-    cleaned = clean(news_text)
-    word_count = len(cleaned.split())
+    word_count = len(news_text.split())
     
-    # ─── ML Model Prediction ───
-    vector = vec.transform([cleaned])
-    prob = model.predict_proba(vector)[0]
-    ml_prob_real = prob[1]  # probability of REAL (class 1)
+    # Always get word-score prediction
+    ws_label, ws_score = word_score_predict(news_text)
     
-    # ─── Linguistic Analysis ───
-    ling_score = compute_linguistic_score(news_text, news_text.lower())
-    # ling_score: 0 = very real, 1 = very fake
-    ling_prob_real = 1.0 - ling_score
+    if ML_MODEL is not None and word_count >= 80:
+        # Long text: combine with ML model
+        ml_label, ml_prob = ml_predict(news_text)
+        
+        # If both agree, use that
+        if ws_label == ml_label:
+            return ws_label
+        
+        # If they disagree, ML model is more reliable for long text
+        # But if word-score has strong signal, trust it
+        if abs(ws_score) > 3.0:
+            return ws_label  # Strong word-score signal
+        else:
+            return ml_label  # Trust ML for long text
     
-    # ─── Combine Predictions ───
-    if word_count >= 80:
-        # LONG TEXT: ML model is very reliable → heavy ML weight
-        ml_weight = 0.85
-        ling_weight = 0.15
-    elif word_count >= 30:
-        # MEDIUM TEXT: ML model is somewhat reliable
-        ml_weight = 0.55
-        ling_weight = 0.45
-    else:
-        # SHORT TEXT (headlines): ML model is unreliable → linguistic dominates
-        ml_weight = 0.30
-        ling_weight = 0.70
-    
-    combined_prob_real = (ml_prob_real * ml_weight) + (ling_prob_real * ling_weight)
-    
-    # ─── Final Decision ───
-    if combined_prob_real >= 0.50:
-        return "REAL"
-    else:
-        return "FAKE"
+    # Short text: word-score classifier only
+    return ws_label
 
 @app.route('/')
 def index():
