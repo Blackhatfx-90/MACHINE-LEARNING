@@ -345,44 +345,7 @@
             margin-top: 2px;
         }
 
-        /* ── Confidence bar ── */
-        .confidence-section {
-            margin-top: 0.25rem;
-        }
-        .conf-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-        .conf-header span {
-            font-size: 0.78rem;
-            color: var(--text-secondary);
-            font-weight: 500;
-        }
-        .conf-header .conf-value {
-            font-family: 'JetBrains Mono', monospace;
-            font-weight: 600;
-            font-size: 0.85rem;
-        }
-        .real .conf-value { color: var(--real-color); }
-        .fake .conf-value { color: var(--fake-color); }
 
-        .conf-bar-track {
-            width: 100%;
-            height: 6px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 100px;
-            overflow: hidden;
-        }
-        .conf-bar-fill {
-            height: 100%;
-            border-radius: 100px;
-            width: 0%;
-            transition: width 1s cubic-bezier(0.22, 1, 0.36, 1);
-        }
-        .real .conf-bar-fill { background: linear-gradient(90deg, #10b981, #34d399); }
-        .fake .conf-bar-fill { background: linear-gradient(90deg, #ef4444, #f87171); }
 
         /* ── Model info chips ── */
         .model-info {
@@ -501,24 +464,10 @@
                         <div class="result-subtitle" id="result-subtitle"></div>
                     </div>
                 </div>
-                <div class="confidence-section">
-                    <div class="conf-header">
-                        <span>Confidence Score</span>
-                        <span class="conf-value" id="conf-value"></span>
-                    </div>
-                    <div class="conf-bar-track">
-                        <div class="conf-bar-fill" id="conf-bar"></div>
-                    </div>
-                </div>
                 <div class="model-info">
                     <span class="chip"><span class="chip-dot"></span> Logistic Regression</span>
                     <span class="chip"><span class="chip-dot"></span> TF-IDF Vectorizer</span>
                     <span class="chip"><span class="chip-dot"></span> NLP Pipeline</span>
-                    <span class="chip" id="mode-chip"><span class="chip-dot"></span> <span id="mode-text">Headline Mode</span></span>
-                    <span class="chip" id="wc-chip"><span class="chip-dot"></span> <span id="wc-text">0 words</span></span>
-                </div>
-                <div id="short-text-warning" style="display:none; margin-top: 0.75rem; padding: 0.6rem 0.85rem; border-radius: 8px; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); font-size: 0.78rem; color: #fbbf24; line-height: 1.4;">
-                    ⚠️ Short text detected — paste the full article for more accurate results.
                 </div>
             </div>
         </div>
@@ -587,45 +536,17 @@
         const icon = document.getElementById('result-icon');
         const label = document.getElementById('result-label');
         const subtitle = document.getElementById('result-subtitle');
-        const confValue = document.getElementById('conf-value');
-        const confBar = document.getElementById('conf-bar');
-        const modeText = document.getElementById('mode-text');
-        const wcText = document.getElementById('wc-text');
-        const shortWarn = document.getElementById('short-text-warning');
 
         const isReal = data.result === 'REAL';
 
         box.className = 'result-box ' + (isReal ? 'real' : 'fake');
         icon.textContent = isReal ? '✅' : '🚫';
-        label.textContent = isReal ? 'Verified — Likely Real' : 'Warning — Likely Fake';
+        label.textContent = isReal ? 'Verified — Real News' : 'Warning — Fake News';
         subtitle.textContent = isReal
             ? 'This article appears to be from a credible source.'
             : 'This article shows patterns commonly found in misinformation.';
-        confValue.textContent = data.confidence + '%';
 
-        // Show analysis mode and word count
-        if (data.mode) {
-            modeText.textContent = data.mode === 'headline' ? 'Headline Mode' : 'Article Mode';
-        }
-        if (data.word_count !== undefined) {
-            wcText.textContent = data.word_count + ' words';
-        }
-
-        // Show warning for very short input
-        if (data.word_count !== undefined && data.word_count < 15) {
-            shortWarn.style.display = 'block';
-        } else {
-            shortWarn.style.display = 'none';
-        }
-
-        confBar.style.width = '0%';
         section.classList.add('visible');
-
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                confBar.style.width = data.confidence + '%';
-            });
-        });
     }
 
     // Allow Ctrl+Enter to submit
