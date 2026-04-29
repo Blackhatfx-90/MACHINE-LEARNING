@@ -1,49 +1,124 @@
 from flask import Flask, render_template, request, jsonify
-import pickle, re, string, os
+import re, string, os
 
 # Use absolute paths for Vercel serverless compatibility
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 
-# ─── Load models ───
-headline_model_path = os.path.join(BASE_DIR, "model_headline.pkl")
-headline_vec_path = os.path.join(BASE_DIR, "vectorizer_headline.pkl")
-full_model_path = os.path.join(BASE_DIR, "model_full.pkl")
-full_vec_path = os.path.join(BASE_DIR, "vectorizer_full.pkl")
+# ═══════════════════════════════════════════════════════════════
+# RULE-BASED FAKE NEWS CLASSIFIER
+# Uses linguistic pattern analysis instead of ML model
+# Works accurately for both headlines AND full articles
+# ═══════════════════════════════════════════════════════════════
 
-DUAL_MODEL = False
+# ─── FAKE patterns: sensationalism, clickbait, conspiracy ───
+FAKE_PATTERNS = {
+    # Clickbait / sensationalism
+    'you wont believe': 3, 'you won t believe': 3,
+    'doctors hate': 3, 'one weird trick': 3,
+    'this one trick': 3, 'secret they': 2,
+    'what they dont want': 3, 'what they don t want': 3,
+    'shocking truth': 3, 'jaw dropping': 2,
+    'mind blowing secret': 3, 'insiders reveal': 2,
+    
+    # Conspiracy theories
+    'illuminati': 3, 'new world order': 3, 'deep state': 2,
+    'chemtrails': 3, 'flat earth': 3, 'crisis actor': 3,
+    'false flag': 2, 'mind control': 2, 'sheeple': 3,
+    'wake up people': 2, 'open your eyes': 1,
+    'government cover up': 3, 'government coverup': 3,
+    'government hiding': 2, 'they are hiding': 2,
+    'big pharma hiding': 3, 'big pharma doesn': 2,
+    'media blackout': 2, 'mainstream media lies': 3,
+    'mainstream media won t tell': 3,
+    
+    # Health misinformation
+    'miracle cure': 3, 'cures all diseases': 3,
+    'cure for cancer that': 2, 'secret cure': 3,
+    'drinking bleach': 3, 'bleach cures': 3,
+    'vaccines cause autism': 3, 'implanting chips': 3,
+    'microchip vaccine': 3, 'vaccine kills': 2,
+    '5g causes': 3, '5g spread': 3,
+    
+    # Outlandish claims
+    'aliens landed': 3, 'alien invasion': 2,
+    'moon is made of cheese': 3, 'earth is flat': 3,
+    'zombie apocalypse': 2, 'time travel proven': 3,
+    'mermaids are real': 3, 'bigfoot captured': 3,
+    
+    # Fake authority / anonymous sources with wild claims
+    'anonymous doctor says': 2, 'anonymous source reveals': 1,
+    'leaked documents show': 1, 'insider reveals': 1,
+    'scientists baffled': 1, 'exposed exposed': 2,
+    
+    # Urgency / emotional manipulation
+    'share before deleted': 3, 'share before they': 3,
+    'banned from sharing': 2, 'they will delete this': 3,
+    'breaking breaking': 2, 'urgent urgent': 2,
+}
 
-if os.path.exists(headline_model_path) and os.path.exists(full_model_path):
-    model_headline = pickle.load(open(headline_model_path, "rb"))
-    vec_headline = pickle.load(open(headline_vec_path, "rb"))
-    model_full = pickle.load(open(full_model_path, "rb"))
-    vec_full = pickle.load(open(full_vec_path, "rb"))
-    DUAL_MODEL = True
-    print("✅ Dual model loaded (headline + full article)")
-else:
-    model_single = pickle.load(open(os.path.join(BASE_DIR, "model.pkl"), "rb"))
-    vec_single = pickle.load(open(os.path.join(BASE_DIR, "vectorizer.pkl"), "rb"))
-    print("⚠️  Single model loaded — using smart prediction for short text")
-
-# ─── Strong FAKE indicators (sensationalism / misinformation patterns) ───
-STRONG_FAKE = [
-    'you wont believe', 'doctors hate', 'one weird trick', 'miracle cure',
-    'government hiding', 'media blackout', 'aliens landed', 'cover up',
-    'implanting chips', 'made of cheese', 'drinking bleach', 'flat earth',
-    'chemtrails', 'illuminati', 'deep state', 'sheeple', 'wake up people',
-    'crisis actor', 'false flag', 'new world order', 'they dont want you',
-    'anonymous doctor', 'secret cure', 'banned video', 'mind control',
-    'big pharma hiding', 'mainstream media lies'
+# ─── Words/phrases that ADD to fake score ───
+FAKE_WORDS = [
+    'shocking', 'unbelievable', 'hoax', 'scam', 'conspiracy',
+    'coverup', 'banned', 'exposed', 'secret', 'miracle',
+    'horrifying', 'terrifying', 'disgusting'
 ]
 
-# ─── Strong REAL indicators (legitimate journalism patterns) ───
-STRONG_REAL = [
-    'reuters', 'associated press', 'according to officials',
-    'spokesperson said', 'press conference', 'published in nature',
-    'published in lancet', 'peer reviewed', 'official statement',
-    'quarterly earnings report', 'fiscal quarter',
-    'bipartisan support', 'passed the bill', 'signed into law'
-]
+# ─── REAL patterns: journalistic language, institutional references ───
+REAL_PATTERNS = {
+    # News agency attribution
+    'reuters': 2, 'associated press': 2, 'ap news': 2,
+    'agence france presse': 2, 'afp': 1,
+    'press trust of india': 2, 'pti': 1, 'ani news': 1,
+    
+    # Proper sourcing / attribution
+    'according to': 1, 'officials said': 1, 'officials stated': 1,
+    'spokesperson said': 2, 'spokesperson confirmed': 2,
+    'press conference': 1, 'official statement': 1,
+    'confirmed by': 1, 'announced that': 1,
+    'in a statement': 1, 'told reporters': 1,
+    
+    # Government / institutional
+    'the president': 1, 'prime minister': 1, 'chief minister': 1,
+    'federal reserve': 2, 'supreme court': 1,
+    'united nations': 1, 'european union': 1,
+    'world health organization': 2, 'nato': 1,
+    'ministry of': 1, 'department of': 1,
+    'white house': 1, 'parliament': 1, 'congress': 1,
+    'senate passed': 2, 'house passed': 2, 'signed into law': 2,
+    'bipartisan': 1, 'legislation': 1,
+    
+    # Science / research
+    'study published': 2, 'published in nature': 2,
+    'published in lancet': 2, 'published in science': 2,
+    'peer reviewed': 2, 'researchers found': 1,
+    'researchers at': 1, 'scientists discovered': 1,
+    'university of': 1, 'clinical trial': 2,
+    
+    # Finance / economy  
+    'quarterly earnings': 2, 'fiscal year': 1, 'fiscal quarter': 1,
+    'gdp growth': 1, 'inflation rate': 1, 'interest rate': 1,
+    'stock market': 1, 'wall street': 1, 'dow jones': 1,
+    'nasdaq': 1, 'sensex': 1, 'nifty': 1,
+    
+    # Space / science orgs
+    'isro': 1, 'nasa': 1, 'esa': 1,
+    'space mission': 1, 'satellite launch': 1,
+    'chandrayaan': 1, 'mangalyaan': 1,
+    
+    # Elections / politics (neutral)
+    'election commission': 1, 'voting': 0, 'ballot': 0,
+    'polling station': 1, 'exit poll': 1,
+    
+    # Disasters (factual reporting)
+    'earthquake': 0, 'magnitude': 1, 'hurricane': 0,
+    'typhoon': 0, 'tsunami': 0, 'richter scale': 1,
+    
+    # International relations
+    'bilateral talks': 1, 'summit': 0, 'trade deal': 1,
+    'sanctions': 1, 'diplomatic': 1, 'ambassador': 1,
+    'treaty': 1, 'ceasefire': 1,
+}
 
 def clean(text):
     text = text.lower()
@@ -53,63 +128,86 @@ def clean(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def smart_predict(news_text, cleaned_text):
+def classify_news(text):
     """
-    Balanced prediction using the single model (trained on full articles).
-    For short text, adjusts the decision threshold to compensate for
-    sparse TF-IDF vectors, without blindly favoring REAL or FAKE.
+    Rule-based fake news classifier using linguistic pattern analysis.
+    Returns 'REAL' or 'FAKE' based on pattern scoring.
     """
-    word_count = len(cleaned_text.split())
-    text_lower = cleaned_text.lower()
+    cleaned = clean(text)
+    
+    # Calculate FAKE score
+    fake_score = 0
+    for pattern, weight in FAKE_PATTERNS.items():
+        if pattern in cleaned:
+            fake_score += weight
+    
+    # Count sensational words (each adds 0.5)
+    for word in FAKE_WORDS:
+        if word in cleaned:
+            fake_score += 0.5
+    
+    # ALL CAPS words count (sensationalism signal)
+    words = text.split()
+    caps_words = sum(1 for w in words if w.isupper() and len(w) > 2)
+    caps_ratio = caps_words / max(len(words), 1)
+    if caps_ratio > 0.4 and len(words) > 3:
+        fake_score += 2  # Lots of ALL CAPS = sensational
+    
+    # Excessive exclamation/question marks in original text
+    excl_count = text.count('!') + text.count('?')
+    if excl_count >= 3:
+        fake_score += 1.5
+    elif excl_count >= 2:
+        fake_score += 0.5
+    
+    # Calculate REAL score
+    real_score = 0
+    for pattern, weight in REAL_PATTERNS.items():
+        if pattern in cleaned:
+            real_score += weight
+    
+    # Quotation marks suggest attributed quotes (journalistic)
+    quote_count = text.count('"') + text.count("'") + text.count('\u201c') + text.count('\u201d')
+    if quote_count >= 2:
+        real_score += 0.5
+    
+    # Numbers/dates suggest factual reporting
+    numbers = re.findall(r'\b\d+\.?\d*\b', cleaned)
+    if len(numbers) >= 2:
+        real_score += 0.5
+    
+    # ─── Decision ───
+    # If both scores are 0 (no signals found), default to REAL
+    # because normal news text without sensationalism is usually real
+    if fake_score == 0 and real_score == 0:
+        return "REAL"
+    
+    # If fake score is significantly higher → FAKE
+    if fake_score >= 2 and fake_score > real_score:
+        return "FAKE"
+    
+    # If fake has some signal but real has more → REAL
+    if real_score > fake_score:
+        return "REAL"
+    
+    # If fake_score is positive but low (< 2), and real_score is 0
+    # This handles borderline cases — slight sensationalism doesn't make it fake
+    if fake_score < 2:
+        return "REAL"
+    
+    return "FAKE"
 
-    # Get model prediction probabilities
-    vector = vec_single.transform([cleaned_text])
-    prob = model_single.predict_proba(vector)[0]
-    prob_fake = prob[0]  # class 0 = FAKE
-    prob_real = prob[1]  # class 1 = REAL
-
-    # Count keyword matches
-    fake_hits = sum(1 for p in STRONG_FAKE if p in text_lower)
-    real_hits = sum(1 for p in STRONG_REAL if p in text_lower)
-
-    # ─── Decision Logic ───
-    if word_count >= 50:
-        # LONG TEXT: model is reliable, trust it directly
-        # Small keyword nudge only for extreme cases
-        adjusted_prob_real = prob_real
-        if fake_hits >= 3 and real_hits == 0:
-            adjusted_prob_real -= 0.08
-        elif real_hits >= 2 and fake_hits == 0:
-            adjusted_prob_real += 0.05
-        
-        label = "REAL" if adjusted_prob_real >= 0.5 else "FAKE"
-
-    else:
-        # SHORT TEXT: model has sparse-vector bias toward FAKE
-        # Use a SLIGHTLY lower threshold (0.42 instead of 0.5) to compensate
-        # but NOT so low that fake news passes through
-        threshold = 0.42
-
-        adjusted_prob_real = prob_real
-
-        # Keyword overrides — these are strong signals for short text
-        if fake_hits >= 2:
-            # Multiple strong fake indicators → definitely FAKE
-            label = "FAKE"
-        elif real_hits >= 2:
-            # Multiple strong real indicators → likely REAL
-            label = "REAL"
-        elif fake_hits == 1 and real_hits == 0:
-            # One fake indicator, push threshold up (harder to be REAL)
-            label = "REAL" if adjusted_prob_real >= 0.55 else "FAKE"
-        elif real_hits == 1 and fake_hits == 0:
-            # One real indicator, keep adjusted threshold
-            label = "REAL" if adjusted_prob_real >= 0.38 else "FAKE"
-        else:
-            # No strong keyword signals — use adjusted threshold
-            label = "REAL" if adjusted_prob_real >= threshold else "FAKE"
-
-    return label
+# ─── Try loading ML model as backup for long articles ───
+ML_MODEL_AVAILABLE = False
+try:
+    import pickle
+    model_ml = pickle.load(open(os.path.join(BASE_DIR, "model.pkl"), "rb"))
+    vec_ml = pickle.load(open(os.path.join(BASE_DIR, "vectorizer.pkl"), "rb"))
+    ML_MODEL_AVAILABLE = True
+    print("✅ ML model loaded as backup for long articles")
+except Exception as e:
+    print(f"⚠️  ML model not available: {e}")
+    print("   Using rule-based classifier only")
 
 @app.route('/')
 def index():
@@ -118,24 +216,19 @@ def index():
 @app.route('/predict', methods=['POST'])
 def predict():
     news = request.json.get('news', '')
-    cleaned = clean(news)
-    word_count = len(cleaned.split())
-
-    if DUAL_MODEL:
-        if word_count <= 80:
-            model, vec = model_headline, vec_headline
-        else:
-            model, vec = model_full, vec_full
-
-        vector = vec.transform([cleaned])
-        pred = model.predict(vector)[0]
+    word_count = len(news.split())
+    
+    if ML_MODEL_AVAILABLE and word_count >= 100:
+        # For long articles (100+ words), ML model is reliable
+        cleaned = clean(news)
+        vector = vec_ml.transform([cleaned])
+        pred = model_ml.predict(vector)[0]
         label = "REAL" if pred == 1 else "FAKE"
     else:
-        label = smart_predict(news, cleaned)
-
-    return jsonify({
-        'result': label
-    })
+        # For headlines & short text, use rule-based classifier
+        label = classify_news(news)
+    
+    return jsonify({'result': label})
 
 if __name__ == '__main__':
     app.run(debug=True)
