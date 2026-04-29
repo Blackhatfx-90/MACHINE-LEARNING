@@ -514,6 +514,11 @@
                     <span class="chip"><span class="chip-dot"></span> Logistic Regression</span>
                     <span class="chip"><span class="chip-dot"></span> TF-IDF Vectorizer</span>
                     <span class="chip"><span class="chip-dot"></span> NLP Pipeline</span>
+                    <span class="chip" id="mode-chip"><span class="chip-dot"></span> <span id="mode-text">Headline Mode</span></span>
+                    <span class="chip" id="wc-chip"><span class="chip-dot"></span> <span id="wc-text">0 words</span></span>
+                </div>
+                <div id="short-text-warning" style="display:none; margin-top: 0.75rem; padding: 0.6rem 0.85rem; border-radius: 8px; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); font-size: 0.78rem; color: #fbbf24; line-height: 1.4;">
+                    ⚠️ Short text detected — paste the full article for more accurate results.
                 </div>
             </div>
         </div>
@@ -584,6 +589,9 @@
         const subtitle = document.getElementById('result-subtitle');
         const confValue = document.getElementById('conf-value');
         const confBar = document.getElementById('conf-bar');
+        const modeText = document.getElementById('mode-text');
+        const wcText = document.getElementById('wc-text');
+        const shortWarn = document.getElementById('short-text-warning');
 
         const isReal = data.result === 'REAL';
 
@@ -594,6 +602,21 @@
             ? 'This article appears to be from a credible source.'
             : 'This article shows patterns commonly found in misinformation.';
         confValue.textContent = data.confidence + '%';
+
+        // Show analysis mode and word count
+        if (data.mode) {
+            modeText.textContent = data.mode === 'headline' ? 'Headline Mode' : 'Article Mode';
+        }
+        if (data.word_count !== undefined) {
+            wcText.textContent = data.word_count + ' words';
+        }
+
+        // Show warning for very short input
+        if (data.word_count !== undefined && data.word_count < 15) {
+            shortWarn.style.display = 'block';
+        } else {
+            shortWarn.style.display = 'none';
+        }
 
         confBar.style.width = '0%';
         section.classList.add('visible');
