@@ -1,213 +1,217 @@
 from flask import Flask, render_template, request, jsonify
-import re, string, os
+import pickle, re, string, os, math
 
 # Use absolute paths for Vercel serverless compatibility
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"))
 
+# ─── Load ML model ───
+model = pickle.load(open(os.path.join(BASE_DIR, "model.pkl"), "rb"))
+vec = pickle.load(open(os.path.join(BASE_DIR, "vectorizer.pkl"), "rb"))
+
 # ═══════════════════════════════════════════════════════════════
-# RULE-BASED FAKE NEWS CLASSIFIER
-# Uses linguistic pattern analysis instead of ML model
-# Works accurately for both headlines AND full articles
+# FAKE NEWS DETECTION — HYBRID APPROACH
+# Combines ML model prediction with linguistic analysis
 # ═══════════════════════════════════════════════════════════════
 
-# ─── FAKE patterns: sensationalism, clickbait, conspiracy ───
-FAKE_PATTERNS = {
-    # Clickbait / sensationalism
-    'you wont believe': 3, 'you won t believe': 3,
-    'doctors hate': 3, 'one weird trick': 3,
-    'this one trick': 3, 'secret they': 2,
-    'what they dont want': 3, 'what they don t want': 3,
-    'shocking truth': 3, 'jaw dropping': 2,
-    'mind blowing secret': 3, 'insiders reveal': 2,
-    
-    # Conspiracy theories
-    'illuminati': 3, 'new world order': 3, 'deep state': 2,
-    'chemtrails': 3, 'flat earth': 3, 'crisis actor': 3,
-    'false flag': 2, 'mind control': 2, 'sheeple': 3,
-    'wake up people': 2, 'open your eyes': 1,
-    'government cover up': 3, 'government coverup': 3,
-    'government hiding': 2, 'they are hiding': 2,
-    'big pharma hiding': 3, 'big pharma doesn': 2,
-    'media blackout': 2, 'mainstream media lies': 3,
-    'mainstream media won t tell': 3,
-    
-    # Health misinformation
-    'miracle cure': 3, 'cures all diseases': 3,
-    'cure for cancer that': 2, 'secret cure': 3,
-    'drinking bleach': 3, 'bleach cures': 3,
-    'vaccines cause autism': 3, 'implanting chips': 3,
-    'microchip vaccine': 3, 'vaccine kills': 2,
-    '5g causes': 3, '5g spread': 3,
-    
-    # Outlandish claims
-    'aliens landed': 3, 'alien invasion': 2,
-    'moon is made of cheese': 3, 'earth is flat': 3,
-    'zombie apocalypse': 2, 'time travel proven': 3,
-    'mermaids are real': 3, 'bigfoot captured': 3,
-    
-    # Fake authority / anonymous sources with wild claims
-    'anonymous doctor says': 2, 'anonymous source reveals': 1,
-    'leaked documents show': 1, 'insider reveals': 1,
-    'scientists baffled': 1, 'exposed exposed': 2,
-    
-    # Urgency / emotional manipulation
-    'share before deleted': 3, 'share before they': 3,
-    'banned from sharing': 2, 'they will delete this': 3,
-    'breaking breaking': 2, 'urgent urgent': 2,
-}
-
-# ─── Words/phrases that ADD to fake score ───
-FAKE_WORDS = [
-    'shocking', 'unbelievable', 'hoax', 'scam', 'conspiracy',
-    'coverup', 'banned', 'exposed', 'secret', 'miracle',
-    'horrifying', 'terrifying', 'disgusting'
+# ─── Sensational / clickbait / conspiracy phrases (strong FAKE signals) ───
+FAKE_PHRASES = [
+    'you wont believe', 'you won t believe', 'doctors hate',
+    'one weird trick', 'this one trick', 'secret they',
+    'what they dont want', 'what they don t want',
+    'shocking truth', 'jaw dropping', 'mind blowing',
+    'illuminati', 'new world order', 'deep state',
+    'chemtrails', 'flat earth', 'crisis actor',
+    'false flag', 'mind control', 'sheeple',
+    'wake up people', 'government cover up', 'government hiding',
+    'big pharma hiding', 'media blackout',
+    'mainstream media lies', 'miracle cure', 'cures all',
+    'secret cure', 'drinking bleach', 'bleach cures',
+    'vaccines cause autism', 'implanting chips', 'microchip vaccine',
+    '5g causes', '5g spread', 'aliens landed', 'alien invasion',
+    'moon is made of cheese', 'earth is flat', 'zombie apocalypse',
+    'share before deleted', 'share before they', 'they will delete',
+    'banned from sharing', 'anonymous doctor says',
+    'scientists baffled by this', 'exposed exposed',
 ]
 
-# ─── REAL patterns: journalistic language, institutional references ───
-REAL_PATTERNS = {
-    # News agency attribution
-    'reuters': 2, 'associated press': 2, 'ap news': 2,
-    'agence france presse': 2, 'afp': 1,
-    'press trust of india': 2, 'pti': 1, 'ani news': 1,
-    
-    # Proper sourcing / attribution
-    'according to': 1, 'officials said': 1, 'officials stated': 1,
-    'spokesperson said': 2, 'spokesperson confirmed': 2,
-    'press conference': 1, 'official statement': 1,
-    'confirmed by': 1, 'announced that': 1,
-    'in a statement': 1, 'told reporters': 1,
-    
-    # Government / institutional
-    'the president': 1, 'prime minister': 1, 'chief minister': 1,
-    'federal reserve': 2, 'supreme court': 1,
-    'united nations': 1, 'european union': 1,
-    'world health organization': 2, 'nato': 1,
-    'ministry of': 1, 'department of': 1,
-    'white house': 1, 'parliament': 1, 'congress': 1,
-    'senate passed': 2, 'house passed': 2, 'signed into law': 2,
-    'bipartisan': 1, 'legislation': 1,
-    
-    # Science / research
-    'study published': 2, 'published in nature': 2,
-    'published in lancet': 2, 'published in science': 2,
-    'peer reviewed': 2, 'researchers found': 1,
-    'researchers at': 1, 'scientists discovered': 1,
-    'university of': 1, 'clinical trial': 2,
-    
-    # Finance / economy  
-    'quarterly earnings': 2, 'fiscal year': 1, 'fiscal quarter': 1,
-    'gdp growth': 1, 'inflation rate': 1, 'interest rate': 1,
-    'stock market': 1, 'wall street': 1, 'dow jones': 1,
-    'nasdaq': 1, 'sensex': 1, 'nifty': 1,
-    
-    # Space / science orgs
-    'isro': 1, 'nasa': 1, 'esa': 1,
-    'space mission': 1, 'satellite launch': 1,
-    'chandrayaan': 1, 'mangalyaan': 1,
-    
-    # Elections / politics (neutral)
-    'election commission': 1, 'voting': 0, 'ballot': 0,
-    'polling station': 1, 'exit poll': 1,
-    
-    # Disasters (factual reporting)
-    'earthquake': 0, 'magnitude': 1, 'hurricane': 0,
-    'typhoon': 0, 'tsunami': 0, 'richter scale': 1,
-    
-    # International relations
-    'bilateral talks': 1, 'summit': 0, 'trade deal': 1,
-    'sanctions': 1, 'diplomatic': 1, 'ambassador': 1,
-    'treaty': 1, 'ceasefire': 1,
-}
+# ─── Sensational single words ───
+SENSATIONAL_WORDS = [
+    'shocking', 'unbelievable', 'incredible', 'horrifying', 'terrifying',
+    'disgusting', 'outrageous', 'insane', 'crazy', 'mindblowing',
+    'explosive', 'bombshell', 'devastating', 'nightmare', 'catastrophic',
+    'evil', 'sinister', 'corrupt', 'betrayal', 'treason', 'traitor',
+    'destroy', 'destroyed', 'annihilate', 'demolish',
+]
+
+# ─── Journalistic / institutional phrases (strong REAL signals) ───
+REAL_PHRASES = [
+    'reuters', 'associated press', 'according to',
+    'officials said', 'officials stated', 'spokesperson said',
+    'spokesperson confirmed', 'press conference', 'official statement',
+    'confirmed by', 'in a statement', 'told reporters',
+    'prime minister', 'federal reserve', 'supreme court',
+    'united nations', 'world health organization',
+    'study published', 'published in nature', 'published in lancet',
+    'peer reviewed', 'researchers found', 'researchers at',
+    'clinical trial', 'quarterly earnings', 'fiscal year',
+    'gdp growth', 'inflation rate', 'interest rate',
+    'signed into law', 'bipartisan support', 'passed the bill',
+    'election commission', 'press trust of india',
+]
 
 def clean(text):
-    text = text.lower()
+    """Clean text — same as training pipeline."""
+    text = str(text).lower()
     text = re.sub(r'https?://\S+|www\.\S+', '', text)
     text = re.sub(r'<.*?>', '', text)
     text = re.sub(r'[%s]' % re.escape(string.punctuation), ' ', text)
+    text = re.sub(r'\w*\d\w*', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def classify_news(text):
+def compute_linguistic_score(original_text, cleaned_text):
     """
-    Rule-based fake news classifier using linguistic pattern analysis.
-    Returns 'REAL' or 'FAKE' based on pattern scoring.
+    Compute a linguistic fake-score from 0 (very real) to 1 (very fake).
+    Analyzes writing style, emotional language, and structural patterns.
     """
-    cleaned = clean(text)
+    text_lower = cleaned_text.lower()
+    words = cleaned_text.split()
+    word_count = len(words)
+    if word_count == 0:
+        return 0.5
     
-    # Calculate FAKE score
-    fake_score = 0
-    for pattern, weight in FAKE_PATTERNS.items():
-        if pattern in cleaned:
-            fake_score += weight
+    score = 0.0
+    signals = 0
     
-    # Count sensational words (each adds 0.5)
-    for word in FAKE_WORDS:
-        if word in cleaned:
-            fake_score += 0.5
+    # ─── 1. Fake phrase matching (strong signal) ───
+    fake_phrase_hits = sum(1 for p in FAKE_PHRASES if p in text_lower)
+    if fake_phrase_hits >= 2:
+        score += 0.9
+        signals += 3
+    elif fake_phrase_hits == 1:
+        score += 0.7
+        signals += 2
     
-    # ALL CAPS words count (sensationalism signal)
-    words = text.split()
-    caps_words = sum(1 for w in words if w.isupper() and len(w) > 2)
-    caps_ratio = caps_words / max(len(words), 1)
-    if caps_ratio > 0.4 and len(words) > 3:
-        fake_score += 2  # Lots of ALL CAPS = sensational
+    # ─── 2. Real phrase matching (strong signal) ───
+    real_phrase_hits = sum(1 for p in REAL_PHRASES if p in text_lower)
+    if real_phrase_hits >= 2:
+        score += 0.05
+        signals += 3
+    elif real_phrase_hits == 1:
+        score += 0.15
+        signals += 2
     
-    # Excessive exclamation/question marks in original text
-    excl_count = text.count('!') + text.count('?')
+    # ─── 3. Sensational word density ───
+    sensational_count = sum(1 for w in SENSATIONAL_WORDS if w in text_lower)
+    sensational_ratio = sensational_count / max(word_count, 1)
+    if sensational_count >= 3:
+        score += 0.8
+        signals += 2
+    elif sensational_count >= 2:
+        score += 0.65
+        signals += 1
+    elif sensational_count == 1:
+        score += 0.5
+        signals += 1
+    else:
+        score += 0.3  # No sensational words = leans real
+        signals += 1
+    
+    # ─── 4. ALL CAPS usage (sensationalism) ───
+    orig_words = original_text.split()
+    caps_words = sum(1 for w in orig_words if w.isupper() and len(w) > 2)
+    caps_ratio = caps_words / max(len(orig_words), 1)
+    if caps_ratio > 0.5 and len(orig_words) > 3:
+        score += 0.8
+        signals += 1
+    elif caps_ratio > 0.25:
+        score += 0.6
+        signals += 1
+    else:
+        score += 0.35
+        signals += 1
+    
+    # ─── 5. Exclamation / question mark excess ───
+    excl_count = original_text.count('!') + original_text.count('?')
     if excl_count >= 3:
-        fake_score += 1.5
+        score += 0.75
+        signals += 1
     elif excl_count >= 2:
-        fake_score += 0.5
+        score += 0.55
+        signals += 1
+    else:
+        score += 0.35
+        signals += 1
     
-    # Calculate REAL score
-    real_score = 0
-    for pattern, weight in REAL_PATTERNS.items():
-        if pattern in cleaned:
-            real_score += weight
+    # ─── 6. Vague attribution ("they say", "sources say") ───
+    vague_phrases = ['they say', 'sources say', 'people are saying',
+                     'everyone knows', 'it is known', 'some say',
+                     'many believe', 'rumor has it', 'word is that']
+    vague_count = sum(1 for p in vague_phrases if p in text_lower)
+    if vague_count > 0:
+        score += 0.65
+        signals += 1
     
-    # Quotation marks suggest attributed quotes (journalistic)
-    quote_count = text.count('"') + text.count("'") + text.count('\u201c') + text.count('\u201d')
-    if quote_count >= 2:
-        real_score += 0.5
+    # ─── 7. Absolute language ("always", "never", "all", "every") ───
+    absolutes = ['always', 'never', 'all of them', 'every single',
+                 'nobody', 'everyone', 'completely', 'totally',
+                 'absolutely', 'definitely', 'proven fact', '100 percent']
+    absolute_count = sum(1 for a in absolutes if a in text_lower)
+    if absolute_count >= 2:
+        score += 0.65
+        signals += 1
+    elif absolute_count == 1:
+        score += 0.5
+        signals += 1
     
-    # Numbers/dates suggest factual reporting
-    numbers = re.findall(r'\b\d+\.?\d*\b', cleaned)
-    if len(numbers) >= 2:
-        real_score += 0.5
+    # Compute average (weighted by signals)
+    if signals > 0:
+        avg_score = score / signals
+    else:
+        avg_score = 0.5
     
-    # ─── Decision ───
-    # If both scores are 0 (no signals found), default to REAL
-    # because normal news text without sensationalism is usually real
-    if fake_score == 0 and real_score == 0:
-        return "REAL"
-    
-    # If fake score is significantly higher → FAKE
-    if fake_score >= 2 and fake_score > real_score:
-        return "FAKE"
-    
-    # If fake has some signal but real has more → REAL
-    if real_score > fake_score:
-        return "REAL"
-    
-    # If fake_score is positive but low (< 2), and real_score is 0
-    # This handles borderline cases — slight sensationalism doesn't make it fake
-    if fake_score < 2:
-        return "REAL"
-    
-    return "FAKE"
+    return avg_score
 
-# ─── Try loading ML model as backup for long articles ───
-ML_MODEL_AVAILABLE = False
-try:
-    import pickle
-    model_ml = pickle.load(open(os.path.join(BASE_DIR, "model.pkl"), "rb"))
-    vec_ml = pickle.load(open(os.path.join(BASE_DIR, "vectorizer.pkl"), "rb"))
-    ML_MODEL_AVAILABLE = True
-    print("✅ ML model loaded as backup for long articles")
-except Exception as e:
-    print(f"⚠️  ML model not available: {e}")
-    print("   Using rule-based classifier only")
+def predict_news(news_text):
+    """
+    Hybrid prediction combining ML model + linguistic analysis.
+    Returns 'REAL' or 'FAKE'.
+    """
+    cleaned = clean(news_text)
+    word_count = len(cleaned.split())
+    
+    # ─── ML Model Prediction ───
+    vector = vec.transform([cleaned])
+    prob = model.predict_proba(vector)[0]
+    ml_prob_real = prob[1]  # probability of REAL (class 1)
+    
+    # ─── Linguistic Analysis ───
+    ling_score = compute_linguistic_score(news_text, news_text.lower())
+    # ling_score: 0 = very real, 1 = very fake
+    ling_prob_real = 1.0 - ling_score
+    
+    # ─── Combine Predictions ───
+    if word_count >= 80:
+        # LONG TEXT: ML model is very reliable → heavy ML weight
+        ml_weight = 0.85
+        ling_weight = 0.15
+    elif word_count >= 30:
+        # MEDIUM TEXT: ML model is somewhat reliable
+        ml_weight = 0.55
+        ling_weight = 0.45
+    else:
+        # SHORT TEXT (headlines): ML model is unreliable → linguistic dominates
+        ml_weight = 0.30
+        ling_weight = 0.70
+    
+    combined_prob_real = (ml_prob_real * ml_weight) + (ling_prob_real * ling_weight)
+    
+    # ─── Final Decision ───
+    if combined_prob_real >= 0.50:
+        return "REAL"
+    else:
+        return "FAKE"
 
 @app.route('/')
 def index():
@@ -216,18 +220,7 @@ def index():
 @app.route('/predict', methods=['POST'])
 def predict():
     news = request.json.get('news', '')
-    word_count = len(news.split())
-    
-    if ML_MODEL_AVAILABLE and word_count >= 100:
-        # For long articles (100+ words), ML model is reliable
-        cleaned = clean(news)
-        vector = vec_ml.transform([cleaned])
-        pred = model_ml.predict(vector)[0]
-        label = "REAL" if pred == 1 else "FAKE"
-    else:
-        # For headlines & short text, use rule-based classifier
-        label = classify_news(news)
-    
+    label = predict_news(news)
     return jsonify({'result': label})
 
 if __name__ == '__main__':
