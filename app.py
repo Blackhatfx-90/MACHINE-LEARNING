@@ -115,7 +115,7 @@ def compute_linguistic_score(original_text, cleaned_text):
         score += 0.5
         signals += 1
     else:
-        score += 0.3  # No sensational words = leans real
+        score += 0.4  # No sensational words = slightly leans real
         signals += 1
     
     # ─── 4. ALL CAPS usage (sensationalism) ───
@@ -164,6 +164,57 @@ def compute_linguistic_score(original_text, cleaned_text):
     elif absolute_count == 1:
         score += 0.5
         signals += 1
+    
+    # ─── 8. Extreme / unrealistic claims detection ───
+    extreme_claim = False
+    
+    # Extreme price drops: "falls to $1", "drops to $5", "crashes to $0"
+    price_drop = re.search(
+        r'(falls?|drops?|crash|crashes|crashed|plummets?|sinks?|tumbles?)'
+        r'\s+(to|below)\s+\$?\s*\d{1,2}(\.\d+)?\b',
+        text_lower
+    )
+    if price_drop:
+        extreme_claim = True
+    
+    # Extreme percentage claims: "drops 90%", "falls 99%", "increases 1000%"
+    pct_match = re.search(
+        r'(drops?|falls?|crash|loses?|gains?|increases?|rises?|surges?)'
+        r'\s+\d+\s*(%|percent)',
+        text_lower
+    )
+    if pct_match:
+        num_match = re.search(r'(\d+)\s*(%|percent)', text_lower)
+        if num_match:
+            pct_val = int(num_match.group(1))
+            if pct_val >= 80 or pct_val >= 500:  # 80%+ drop or 500%+ gain
+                extreme_claim = True
+    
+    # "Free" / too good to be true
+    too_good = re.search(
+        r'(free money|free iphone|free bitcoin|won a|you have won|'
+        r'congratulations you|claim your prize|lottery winner|'
+        r'send this to|forward this to)',
+        text_lower
+    )
+    if too_good:
+        extreme_claim = True
+    
+    # Extreme world event claims (without proper source attribution)
+    extreme_events = [
+        'world war 3', 'world war iii', 'nuclear bomb dropped',
+        'president assassinated', 'president killed', 'country destroyed',
+        'city destroyed', 'millions dead', 'billions dead',
+        'end of the world', 'apocalypse', 'martial law declared',
+        'internet shutdown', 'dollar collapsed', 'economy collapsed',
+    ]
+    extreme_event_hits = sum(1 for e in extreme_events if e in text_lower)
+    if extreme_event_hits > 0 and real_phrase_hits == 0:
+        extreme_claim = True
+    
+    if extreme_claim:
+        score += 0.85
+        signals += 2  # Double weight for extreme claims
     
     # Compute average (weighted by signals)
     if signals > 0:
